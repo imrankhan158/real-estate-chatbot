@@ -2,7 +2,7 @@
 
 An AI-powered property search chatbot that scrapes listings from **DarGlobal** (international luxury real estate) and **Wasalt** (Saudi Arabia's leading property marketplace), then lets users query them in natural language.
 
-> **Live URL:** *(add after deployment)*
+> **Live URL: https://darglobal.up.railway.app/
 
 ---
 
