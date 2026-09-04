@@ -1,22 +1,4 @@
 services:
-  vectordb:
-    image: chromadb/chroma:0.5.20
-    container_name: re_vectordb
-    environment:
-      - IS_PERSISTENT=TRUE
-      - PERSIST_DIRECTORY=/chroma/chroma
-      - ANONYMIZED_TELEMETRY=FALSE
-    volumes:
-      - chroma_data:/chroma/chroma
-    ports:
-      - "8001:8000"
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-
   scraper:
     build:
       context: ./scraper
@@ -28,9 +10,6 @@ services:
       - DATA_DIR=/app/data
     volumes:
       - ./data:/app/data
-    depends_on:
-      vectordb:
-        condition: service_healthy
     restart: "no"
 
   backend:
@@ -40,17 +19,15 @@ services:
     container_name: re_backend
     env_file: .env
     environment:
-      - CHROMA_HOST=vectordb
-      - CHROMA_PORT=8000
       - DATA_DIR=/app/data
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_INDEX_NAME=${PINECONE_INDEX_NAME:-real-estate}
     volumes:
       - ./data:/app/data
     ports:
       - "8080:8080"
     depends_on:
-      vectordb:
-        condition: service_healthy
       scraper:
         condition: service_completed_successfully
     healthcheck:
@@ -74,6 +51,3 @@ services:
         condition: service_healthy
     environment:
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8080}
-
-volumes:
-  chroma_data:

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Building2, RotateCcw, Send } from "lucide-react";
 
 import { fetchStats, streamChat, type Stats } from "@/lib/api";
@@ -21,18 +21,17 @@ export default function ChatWindow() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Keep a ref so async callbacks always see the current loading state
+  const isLoadingRef = useRef(false);
 
-  // Load stats once on mount
   useEffect(() => {
     fetchStats().then(setStats).catch(() => setStats(null));
   }, []);
 
-  // Scroll to latest message
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Auto-resize textarea
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -40,83 +39,80 @@ export default function ChatWindow() {
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, [input]);
 
-  const sendMessage = useCallback(async (text: string) => {
+  async function sendMessage(text: string) {
     const trimmed = text.trim();
-    if (!trimmed || isLoading) return;
+    if (!trimmed || isLoadingRef.current) return;
 
     setError(null);
     setInput("");
+    setIsLoading(true);
+    isLoadingRef.current = true;
 
     const userMsg: Message = { id: uid(), role: "user", content: trimmed };
     const botId = uid();
     const botMsg: Message = { id: botId, role: "assistant", content: "", isStreaming: true };
 
-    // Capture history before updating state
-    setMessages((prev) => {
-      const history = prev.map(({ role, content }) => ({ role, content }));
+    // Snapshot history from current messages before appending new ones
+    const history = messages.map(({ role, content }) => ({ role, content }));
+    setMessages((prev) => [...prev, userMsg, botMsg]);
 
-      abortRef.current = new AbortController();
-      setIsLoading(true);
+    abortRef.current = new AbortController();
 
-      streamChat(trimmed, history, abortRef.current.signal)
-        .then((reader) =>
-          parseSSEStream(reader, {
-            onToken: (token) =>
-              setMessages((m) =>
-                m.map((msg) =>
-                  msg.id === botId
-                    ? { ...msg, content: msg.content + token, isStreaming: true }
-                    : msg,
-                ),
-              ),
-            onError: (err) => {
-              setError(err);
-              setMessages((m) =>
-                m.map((msg) =>
-                  msg.id === botId
-                    ? { ...msg, content: `Sorry, an error occurred: ${err}`, isStreaming: false }
-                    : msg,
-                ),
-              );
-            },
-            onDone: () => {
-              setMessages((m) =>
-                m.map((msg) => (msg.id === botId ? { ...msg, isStreaming: false } : msg)),
-              );
-              setIsLoading(false);
-            },
-          }),
-        )
-        .catch((err: unknown) => {
-          if (err instanceof Error && err.name === "AbortError") return;
-          setError(err instanceof Error ? err.message : "Connection error");
+    try {
+      const reader = await streamChat(trimmed, history, abortRef.current.signal);
+      await parseSSEStream(reader, {
+        onToken: (token) =>
+          setMessages((m) =>
+            m.map((msg) =>
+              msg.id === botId ? { ...msg, content: msg.content + token } : msg,
+            ),
+          ),
+        onError: (err) => {
+          setError(err);
           setMessages((m) =>
             m.map((msg) =>
               msg.id === botId
-                ? { ...msg, content: "Connection error. Please try again.", isStreaming: false }
+                ? { ...msg, content: `Sorry, an error occurred: ${err}`, isStreaming: false }
                 : msg,
             ),
           );
-          setIsLoading(false);
-        });
+        },
+        onDone: () =>
+          setMessages((m) =>
+            m.map((msg) => (msg.id === botId ? { ...msg, isStreaming: false } : msg)),
+          ),
+      });
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === "AbortError") return;
+      const msg = err instanceof Error ? err.message : "Connection error";
+      setError(msg);
+      setMessages((m) =>
+        m.map((msg) =>
+          msg.id === botId
+            ? { ...msg, content: "Connection error. Please try again.", isStreaming: false }
+            : msg,
+        ),
+      );
+    } finally {
+      setIsLoading(false);
+      isLoadingRef.current = false;
+    }
+  }
 
-      return [...prev, userMsg, botMsg];
-    });
-  }, [isLoading]);
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage(input);
     }
-  };
+  }
 
-  const handleReset = () => {
+  function handleReset() {
     abortRef.current?.abort();
     setMessages([]);
     setError(null);
     setIsLoading(false);
-  };
+    isLoadingRef.current = false;
+  }
 
   const isEmpty = messages.length === 0;
 
@@ -179,7 +175,7 @@ export default function ChatWindow() {
         </div>
       </main>
 
-      {/* Suggested prompts – shown below messages once chat has started */}
+      {/* Suggested prompts after first message */}
       {!isEmpty && !isLoading && (
         <div className="shrink-0 border-t border-white/5 bg-[#0f0f0f] px-4 pt-3">
           <div className="max-w-4xl mx-auto">

@@ -9,34 +9,33 @@ An AI-powered property search chatbot that scrapes listings from **DarGlobal** (
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Docker Compose                        │
-│                                                             │
-│  ┌──────────────┐   ┌──────────────────┐   ┌────────────┐  │
-│  │  Scraper     │──▶│  Backend (FastAPI)│◀──│ Frontend   │  │
-│  │  (Python)    │   │  + RAG pipeline   │   │ (Next.js)  │  │
-│  └──────────────┘   └────────┬─────────┘   └────────────┘  │
-│                              │                              │
-│                    ┌─────────▼─────────┐                   │
-│                    │  ChromaDB (vector) │                   │
-│                    └───────────────────┘                   │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                    ┌─────────▼─────────┐
-                    │  OpenRouter API    │
-                    │  (free LLM models) │
-                    └───────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                      Docker Compose                       │
+│                                                          │
+│  ┌──────────────┐   ┌──────────────────┐  ┌──────────┐  │
+│  │  Scraper     │──▶│  Backend (FastAPI)│◀─│ Frontend │  │
+│  │  (Python)    │   │  + RAG pipeline  │  │ Next.js  │  │
+│  └──────────────┘   └────────┬─────────┘  └──────────┘  │
+└────────────────────────────  │  ──────────────────────────┘
+                               │ HTTPS
+               ┌───────────────┴──────────────┐
+               │                              │
+   ┌───────────▼──────────┐      ┌────────────▼────────┐
+   │  Pinecone (cloud)    │      │  OpenRouter API     │
+   │  Serverless Vector DB│      │  (free LLM models)  │
+   └──────────────────────┘      └─────────────────────┘
 ```
 
 **Tech Stack**
+
 | Layer | Technology |
 |-------|-----------|
 | Scraper | Python + httpx + BeautifulSoup4 + Playwright |
 | Backend | FastAPI + Python 3.12 |
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (local, free) |
-| Vector DB | ChromaDB (persistent) |
-| LLM | OpenRouter (free tier: Llama 3.1 8B, Mistral 7B) |
-| Frontend | Next.js 14 + Tailwind CSS |
+| Vector DB | **Pinecone** (serverless, cloud) |
+| LLM | OpenRouter – free tier (Gemma 4, Nemotron, MiniMax) |
+| Frontend | Next.js **16** + React 19 + Tailwind CSS |
 | Container | Docker Compose v2 |
 | Deployment | Railway |
 
@@ -46,7 +45,8 @@ An AI-powered property search chatbot that scrapes listings from **DarGlobal** (
 
 ### Prerequisites
 - Docker & Docker Compose v2
-- An [OpenRouter](https://openrouter.ai) API key (free, no credit card)
+- [OpenRouter](https://openrouter.ai) API key (free, no credit card)
+- [Pinecone](https://pinecone.io) API key (free Starter plan)
 
 ### 1. Clone & configure
 ```bash
@@ -55,9 +55,11 @@ cd real-estate-chatbot
 cp .env.example .env
 ```
 
-Edit `.env` and set your key:
-```
+Edit `.env` and set your keys:
+```env
 OPENROUTER_API_KEY=sk-or-...
+PINECONE_API_KEY=pcsk_...
+PINECONE_INDEX_NAME=real-estate
 ```
 
 ### 2. Run
@@ -66,13 +68,31 @@ docker compose up --build
 ```
 
 This will:
-1. Start ChromaDB
-2. Run the scraper (DarGlobal + Wasalt) – writes to shared volume
-3. Start the backend (FastAPI) – ingests data into ChromaDB on startup
-4. Start the frontend (Next.js) – available at **http://localhost:3000**
+1. Run the scraper (DarGlobal + Wasalt) – writes JSON to `./data/`
+2. Start the backend (FastAPI) – embeds properties and upserts to Pinecone on startup
+3. Start the frontend (Next.js) – available at **http://localhost:3000**
 
-First build takes ~5–10 minutes (downloads ML model, installs deps).  
-Subsequent starts are fast (data is cached in Docker volumes).
+First build takes ~5–10 minutes (downloads ML model, installs deps).
+Subsequent starts are fast — Pinecone skips re-ingestion if vectors already exist.
+
+---
+
+## Re-running the Scraper
+
+To force a fresh scrape and re-ingest:
+
+```bash
+# 1. Delete cached data files
+rm -f data/darglobal.json data/wasalt.json
+
+# 2. Re-run the scraper
+docker compose run --rm scraper
+
+# 3. Restart the backend to re-ingest into Pinecone
+docker compose up -d --no-deps backend
+```
+
+> The scraper respects `SCRAPE_MAX_PAGES` (default: 5). Increase it in `.env` for more listings.
 
 ---
 
@@ -80,11 +100,13 @@ Subsequent starts are fast (data is cached in Docker volumes).
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `OPENROUTER_API_KEY` | ✅ | – | Your OpenRouter API key |
-| `SCRAPE_MAX_PAGES` | ❌ | `5` | Max pages per scraper (reduce for faster dev) |
+| `OPENROUTER_API_KEY` | ✅ | – | OpenRouter API key for LLM |
+| `PINECONE_API_KEY` | ✅ | – | Pinecone API key |
+| `PINECONE_INDEX_NAME` | ❌ | `real-estate` | Pinecone index name |
+| `SCRAPE_MAX_PAGES` | ❌ | `5` | Max listing pages per scraper |
 | `NEXT_PUBLIC_API_URL` | ❌ | `http://localhost:8080` | Backend URL for the frontend |
-| `CHROMA_HOST` | ❌ | `vectordb` | ChromaDB hostname |
-| `CHROMA_PORT` | ❌ | `8000` | ChromaDB port |
+| `APP_URL` | ❌ | `http://localhost:3000` | Your app URL (OpenRouter attribution) |
+| `APP_TITLE` | ❌ | `Real Estate AI Chatbot` | App title (OpenRouter attribution) |
 
 ---
 
@@ -92,7 +114,7 @@ Subsequent starts are fast (data is cached in Docker volumes).
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/health` | Health check + indexed count |
+| `GET` | `/health` | Health check + indexed vector count |
 | `GET` | `/api/stats` | Property counts per source |
 | `POST` | `/api/chat` | Chat (SSE streaming) |
 | `GET` | `/api/properties` | Browse/search properties |
@@ -109,27 +131,37 @@ curl -X POST http://localhost:8080/api/chat \
 
 ## Deployment (Railway)
 
-1. Push to GitHub
+1. Push repo to GitHub
 2. Create a new Railway project → **Deploy from GitHub repo**
 3. Railway auto-detects `docker-compose.yml`
-4. Set environment variable: `OPENROUTER_API_KEY=sk-or-...`
+4. Set environment variables in Railway dashboard:
+   - `OPENROUTER_API_KEY`
+   - `PINECONE_API_KEY`
+   - `PINECONE_INDEX_NAME`
+   - `APP_URL` ← set to your Railway public URL
 5. Deploy → Railway provides a public HTTPS URL
+
+**Startup order:**
+```
+scraper (completed) → backend (healthy) → frontend
+```
 
 ---
 
 ## Data Sources
 
-- **DarGlobal** (`darglobal.co.uk`) – International luxury real estate developer with properties in UAE, UK, Saudi Arabia, Oman, Qatar, and Spain. Brand collaborations include Aston Martin, Lamborghini, Dolce & Gabbana, and Trump.
-- **Wasalt** (`wasalt.com`) – Saudi Arabia's leading property portal with thousands of residential, commercial, and land listings across Riyadh, Jeddah, Dammam, and other cities.
+- **DarGlobal** (`darglobal.co.uk`) – International luxury developer with properties in UAE, UK, Saudi Arabia, Oman, Qatar, and Spain. Brands include Aston Martin, Lamborghini, Dolce & Gabbana, and Trump.
+- **Wasalt** (`wasalt.com`) – Saudi Arabia's leading property portal with residential, commercial, and land listings across Riyadh, Jeddah, Dammam, and more.
 
-*Note: The scraper collects only publicly available listing data. If live scraping is blocked, the system falls back to a curated sample dataset representing real property types from each source.*
+*If live scraping is blocked, the system automatically falls back to a curated sample dataset representing real property types from each source.*
 
 ---
 
 ## Security
 
-- API key stored in `.env`, never committed
-- CORS restricted to frontend origin in production
+- API keys stored in `.env` only — never in image layers or source code
+- Topic guard (`guard.py`) blocks all non-real-estate questions before they reach the LLM
+- CORS restricted to configured `ALLOWED_ORIGINS` in production
 - Rate limiting on `/api/chat`: 15 requests/minute per IP
-- No user data is persisted; chat history lives in browser session only
-- Scrapers respect `robots.txt` and use conservative rate limits (1–2 req/s)
+- Chat history never persisted server-side — lives in browser session only
+- Scrapers respect `robots.txt` with 1–2 req/s rate limiting

@@ -29,39 +29,40 @@ from two sources — **DarGlobal** (international luxury properties) and **Wasal
 language.
 
 It uses a **Retrieval-Augmented Generation (RAG)** architecture: property data is
-embedded into a vector database at startup, and every user query retrieves the most
-relevant listings before passing them to a free LLM via OpenRouter. The LLM answers
-strictly from the retrieved data, not from its training knowledge.
+embedded into **Pinecone** (a serverless cloud vector database) at startup, and every
+user query retrieves the most relevant listings before passing them to a free LLM via
+OpenRouter. The LLM answers strictly from the retrieved data, not from its training
+knowledge.
 
 ---
 
 ## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                            Docker Compose                                │
-│                                                                         │
-│  ┌─────────────────┐    ┌──────────────────────┐    ┌───────────────┐  │
-│  │  Scraper        │───▶│  Backend (FastAPI)    │◀───│  Frontend     │  │
-│  │  Python         │    │                      │    │  Next.js 14   │  │
-│  │                 │    │  ┌────────────────┐  │    │  Tailwind CSS │  │
-│  │  - darglobal.py │    │  │ guard.py       │  │    └───────────────┘  │
-│  │  - wasalt.py    │    │  │ rag.py         │  │           │           │
-│  └────────┬────────┘    │  │ chat.py        │  │    http://localhost   │
-│           │             │  │ ingest.py      │  │           :3000       │
-│           │ JSON files  │  └───────┬────────┘  │                       │
-│           ▼             └──────────┼───────────┘                       │
-│     ┌───────────┐                  │                                    │
-│     │  ./data/  │        ┌─────────▼──────────┐                        │
-│     │  volume   │        │  ChromaDB          │                        │
-│     └───────────┘        │  (vector store)    │                        │
-│                          └────────────────────┘                        │
-└──────────────────────────────────────┬─────────────────────────────────┘
-                                       │ HTTPS
-                              ┌────────▼────────┐
-                              │  OpenRouter API  │
-                              │  (free LLM tier) │
-                              └─────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                              Docker Compose                               │
+│                                                                          │
+│  ┌──────────────────┐    ┌──────────────────────┐    ┌───────────────┐  │
+│  │  Scraper         │───▶│  Backend (FastAPI)    │◀───│  Frontend     │  │
+│  │  Python          │    │                      │    │  Next.js 16   │  │
+│  │                  │    │  ┌────────────────┐  │    │  React 19     │  │
+│  │  - darglobal.py  │    │  │ guard.py       │  │    │  Tailwind CSS │  │
+│  │  - wasalt.py     │    │  │ rag.py         │  │    └───────────────┘  │
+│  └────────┬─────────┘    │  │ chat.py        │  │           │           │
+│           │              │  │ ingest.py      │  │    http://localhost   │
+│           │ ./data/*.json│  └───────┬────────┘  │           :3000       │
+│           ▼              └──────────┼───────────┘                       │
+│     ┌───────────┐                   │ HTTPS                             │
+│     │  ./data/  │                   │                                   │
+│     │  volume   │       ┌───────────┴──────────────┐                   │
+│     └───────────┘       │                          │                   │
+└─────────────────────    │  ────────────────────────│───────────────────┘
+                          │                          │
+             ┌────────────▼──────────┐  ┌────────────▼────────┐
+             │  Pinecone (cloud)     │  │  OpenRouter API     │
+             │  Serverless Vector DB │  │  (free LLM tier)    │
+             │  Index: real-estate   │  │                     │
+             └───────────────────────┘  └─────────────────────┘
 ```
 
 **Ports exposed to host:**
@@ -70,7 +71,8 @@ strictly from the retrieved data, not from its training knowledge.
 |------|---------|---------|
 | 3000 | Frontend | Chat UI |
 | 8080 | Backend | REST API |
-| 8001 | ChromaDB | Vector DB (dev inspection) |
+
+> There is no local vector DB container — Pinecone is a fully managed cloud service.
 
 ---
 
@@ -79,7 +81,7 @@ strictly from the retrieved data, not from its training knowledge.
 ```
 real-estate-chatbot/
 │
-├── docker-compose.yml          # Orchestrates all four services
+├── docker-compose.yml          # Orchestrates three services (scraper, backend, frontend)
 ├── .env                        # Secrets & config (never committed)
 ├── .env.example                # Template for .env
 ├── .gitignore
@@ -99,11 +101,11 @@ real-estate-chatbot/
 │   ├── main.py                 # App setup, routes, middleware
 │   ├── config.py               # All settings from environment variables
 │   ├── guard.py                # Topic guard – blocks off-topic questions
-│   ├── ingest.py               # Loads JSON → embeds → upserts to ChromaDB
-│   ├── rag.py                  # Query embedding + ChromaDB retrieval
+│   ├── ingest.py               # Loads JSON → embeds → upserts to Pinecone
+│   ├── rag.py                  # Query embedding + Pinecone retrieval
 │   └── chat.py                 # OpenRouter streaming integration
 │
-├── frontend/                   # Next.js chat UI
+├── frontend/                   # Next.js 16 chat UI
 │   ├── Dockerfile
 │   ├── package.json
 │   ├── next.config.js
@@ -145,22 +147,26 @@ A short-lived Python process that runs **once at startup** and then exits.
 A **FastAPI** application that forms the core of the system.
 
 Responsibilities:
-- On startup: reads the JSON files and ingests all properties into ChromaDB
-  (embedding each listing with `sentence-transformers/all-MiniLM-L6-v2`).
-- On each chat request: validates the topic, retrieves relevant listings,
-  builds a prompt, and streams the LLM response back to the client.
+- On startup: reads the JSON files, embeds each listing using
+  `sentence-transformers/all-MiniLM-L6-v2`, and upserts vectors to **Pinecone**.
+  Idempotent — skips re-ingestion if vectors already exist in the index.
+- On each chat request: validates the topic via `guard.py`, retrieves the most
+  relevant listings from Pinecone, builds a prompt, and streams the LLM response
+  back to the client via SSE.
 
-### 3. ChromaDB (`vectordb`)
+### 3. Pinecone (external cloud service)
 
-A persistent vector database used to store property embeddings.
+A **serverless vector database** used to store and query property embeddings.
 
-- Runs as a standalone container using the official `chromadb/chroma` image.
-- Embeddings persist across container restarts via a named Docker volume (`chroma_data`).
-- The backend queries it on every chat request via cosine similarity search.
+- Index name: `real-estate`
+- Dimension: `384` (matches `all-MiniLM-L6-v2` output)
+- Metric: `cosine`
+- Cloud: AWS `us-east-1` (serverless — no infrastructure to manage)
+- Created automatically by `ingest.py` on first run if it does not exist.
 
 ### 4. Frontend (`frontend/`)
 
-A **Next.js 14** single-page app served as a standalone Node.js process.
+A **Next.js 16** single-page app (React 19) served as a standalone Node.js process.
 
 - Renders the chat UI with streaming token display.
 - Calls `GET /api/stats` on load to show property counts in the header.
@@ -176,9 +182,6 @@ A **Next.js 14** single-page app served as a standalone Node.js process.
 ```
 Docker Compose starts services in dependency order:
 
-  vectordb (healthy)
-       │
-       ▼
   scraper (runs once, exits)
        │  writes ./data/darglobal.json
        │  writes ./data/wasalt.json
@@ -186,6 +189,11 @@ Docker Compose starts services in dependency order:
   backend (starts FastAPI)
        │
        │  lifespan event fires → ingest.ingest_all()
+       │
+       ├─ connect to Pinecone index "real-estate"
+       ├─ check index.describe_index_stats() → total_vector_count
+       │    if count > 0 → skip (already ingested)
+       │    if count = 0 → proceed
        │
        ├─ reads darglobal.json  (12+ properties)
        ├─ reads wasalt.json     (15+ properties)
@@ -201,12 +209,13 @@ Docker Compose starts services in dependency order:
        │    embedding = SentenceTransformer.encode(text_chunk)
        │      → float[384]  (all-MiniLM-L6-v2 output dimension)
        │
-       │    ChromaDB.upsert(id, document, embedding, metadata)
+       │    Pinecone.upsert({ id, values: embedding, metadata })
+       │      metadata includes: source, title, price, city, url, text (chunk)
        │
-       └─ 27 documents indexed → FastAPI ready
+       └─ 27 vectors upserted → FastAPI ready
                │
                ▼
-         frontend (starts Next.js)
+         frontend (starts Next.js 16)
                │
                ▼
          http://localhost:3000  (ready for users)
@@ -262,7 +271,7 @@ Backend: main.py → chat_endpoint()
 
   If BLOCKED:
     → returns SSE stream with rejection message instantly
-    → no LLM call made, no ChromaDB query
+    → no LLM call made, no Pinecone query
 ```
 
 ---
@@ -275,20 +284,22 @@ Backend: rag.retrieve("Show me luxury villas in Dubai", k=5)
   ├─ model.encode(["Show me luxury villas in Dubai"])
   │    → query_embedding: float[384]
   │
-  └─ ChromaDB.query(
-         query_embeddings=[query_embedding],
-         n_results=5,
-         include=["documents", "metadatas", "distances"]
+  └─ Pinecone.query(
+         vector=query_embedding,
+         top_k=5,
+         include_metadata=True
      )
        │
-       │  Cosine similarity search across 27 property embeddings
+       │  Cosine similarity search across 27 property vectors
        │
-       └─ Returns top 5 closest documents, e.g.:
-            1. Lamborghini Residences – Sky Villa (relevance: 0.91)
-            2. Trump Estates – 4BR Golf Villa    (relevance: 0.88)
-            3. DarGlobal Oman – Waterfront Villa  (relevance: 0.84)
-            4. Sea-View Villa – Al Shati, Jeddah  (relevance: 0.79)
-            5. Luxury Compound Villa – Al Yasmin  (relevance: 0.76)
+       └─ Returns top 5 matches, e.g.:
+            1. Lamborghini Residences – Sky Villa  (score: 0.91)
+            2. Trump Estates – 4BR Golf Villa      (score: 0.88)
+            3. DarGlobal Oman – Waterfront Villa   (score: 0.84)
+            4. Sea-View Villa – Al Shati, Jeddah   (score: 0.79)
+            5. Luxury Compound Villa – Al Yasmin   (score: 0.76)
+
+          Each match includes full metadata + stored text chunk
 
   rag.build_context(results)
     → Formatted string:
@@ -317,7 +328,7 @@ Backend: chat.stream_chat(message, history, context)
   │         { role: "user",    content: "..." },   ← history turns (last 6)
   │         { role: "assistant", content: "..." },
   │         { role: "user",    content:
-  │             "Available properties:\n{context}\n\nQuestion: Show me luxury villas in Dubai"
+  │             "Available properties:\n{context}\n\nQuestion: ..."
   │         }
   │       ]
   │
@@ -344,26 +355,18 @@ Backend → Frontend: SSE (Server-Sent Events) stream
   data: {"token": "Here"}
   data: {"token": " are"}
   data: {"token": " some"}
-  data: {"token": " luxury"}
-  data: {"token": " villas"}
   ...
   data: [DONE]
 
 Frontend: lib/sse.ts → parseSSEStream()
   │
   │  onToken(token):
-  │    setMessages(prev =>
-  │      prev.map(msg =>
-  │        msg.id === botId
-  │          ? { ...msg, content: msg.content + token }
-  │          : msg
-  │      )
-  │    )
+  │    setMessages → append token to bot message content
   │    → React re-renders MessageBubble with growing content
   │    → User sees text appearing word by word
   │
   └─ onDone():
-       setMessages → isStreaming: false
+       isStreaming: false
        setIsLoading(false)
        Typing cursor disappears
 ```
@@ -374,34 +377,34 @@ Frontend: lib/sse.ts → parseSSEStream()
 
 ### `config.py` – Settings
 
-Single source of truth for all configuration. Every module imports `settings` —
-nothing reads `os.environ` directly.
+Single source of truth for all configuration. Every module imports `settings`.
 
 | Setting | Env Var | Default | Description |
 |---------|---------|---------|-------------|
 | `openrouter_api_key` | `OPENROUTER_API_KEY` | `""` | Required for LLM calls |
-| `chroma_host` | `CHROMA_HOST` | `vectordb` | ChromaDB hostname |
-| `chroma_port` | `CHROMA_PORT` | `8000` | ChromaDB port |
+| `pinecone_api_key` | `PINECONE_API_KEY` | `""` | Required for vector DB |
+| `pinecone_index_name` | `PINECONE_INDEX_NAME` | `real-estate` | Pinecone index name |
 | `data_dir` | `DATA_DIR` | `/app/data` | Path to JSON data files |
 | `allowed_origins` | `ALLOWED_ORIGINS` | `*` | CORS origins |
 | `app_url` | `APP_URL` | `http://localhost:3000` | OpenRouter attribution |
 | `app_title` | `APP_TITLE` | `Real Estate AI Chatbot` | OpenRouter attribution |
 | `embedding_model` | – | `all-MiniLM-L6-v2` | Sentence transformer model |
+| `embedding_dimension` | – | `384` | Vector dimension (must match index) |
 | `llm_models` | – | (list) | Ordered fallback model list |
 
 ---
 
 ### `guard.py` – Topic Guard
 
-Prevents off-topic questions from reaching the LLM.
+Prevents off-topic questions from reaching the LLM and Pinecone.
 
 ```
 Input message
      │
      ▼
-_BLOCKED_RE.search()    ← regex blocklist (coding, travel, general knowledge)
+_BLOCKED_RE.search()    ← regex blocklist (coding, travel, general knowledge, weather)
      │
-     ├─ match → REJECT immediately (no LLM call)
+     ├─ match → REJECT immediately (no LLM call, no Pinecone query)
      │
      ▼
 word count ≤ 6?          ← short follow-ups allowed ("tell me more", "how much?")
@@ -422,17 +425,21 @@ _SIGNAL_RE.search()     ← must contain a real-estate keyword
 | Function | Description |
 |----------|-------------|
 | `get_model()` | Lazy-loads `all-MiniLM-L6-v2` sentence transformer (singleton) |
-| `get_collection()` | Lazy-connects to ChromaDB and returns the collection (singleton) |
-| `ingest_all()` | Loads JSON → builds text chunks → embeds → upserts; idempotent |
-| `get_stats()` | Returns `{total, darglobal, wasalt}` counts |
+| `get_index()` | Lazy-connects to Pinecone, creates index if missing (singleton) |
+| `ingest_all()` | Loads JSON → embeds → upserts to Pinecone; idempotent |
+| `get_stats()` | Returns `{total, darglobal, wasalt}` counts via Pinecone metadata filter |
 
-**Text chunk format** (what gets embedded and stored):
+**Vector structure stored in Pinecone:**
 ```
-[SOURCE] Property Title
-Location: District, City, Country
-Price: CURRENCY AMOUNT | Type: TYPE | N beds | N baths | N sqm
-Amenities: Pool, Gym, ...
-Description: First 500 chars of description
+{
+  id: "darglobal_sample_001",
+  values: float[384],          ← embedding of text chunk
+  metadata: {
+    source, title, property_type, price, currency,
+    city, country, bedrooms, bathrooms, area_sqm, url,
+    text  ← full text chunk (returned in query results)
+  }
+}
 ```
 
 ---
@@ -441,8 +448,11 @@ Description: First 500 chars of description
 
 | Function | Description |
 |----------|-------------|
-| `retrieve(query, k, filters)` | Embeds query, queries ChromaDB, returns top-k results |
+| `retrieve(query, k, filters)` | Embeds query, queries Pinecone, returns top-k results |
 | `build_context(results)` | Formats results into a prompt context string |
+
+Pinecone returns scores between 0–1 (cosine similarity). The `text` field stored in
+metadata is used directly as the document, avoiding a second round-trip.
 
 ---
 
@@ -454,7 +464,7 @@ Description: First 500 chars of description
 | `_build_messages(user_message, history, context)` | Assembles OpenAI-format message array |
 | `_sse(payload)` | Formats a dict as an SSE data line |
 
-**Model fallback order:**
+**Model fallback order (free tier, verified Sept 2026):**
 1. `google/gemma-4-31b-it:free`
 2. `nvidia/nemotron-3-ultra-550b-a55b:free`
 3. `minimax/minimax-m3:free`
@@ -487,13 +497,13 @@ and dispatches to the appropriate callback. Pure utility — no React dependency
 ## API Reference
 
 ### `GET /health`
-Returns the backend liveness status and number of indexed properties.
+Returns backend liveness status and Pinecone vector count.
 ```json
 { "status": "ok", "indexed": 27 }
 ```
 
 ### `GET /api/stats`
-Returns property counts per data source.
+Returns property counts per data source (via Pinecone metadata filter).
 ```json
 { "total": 27, "darglobal": 12, "wasalt": 15 }
 ```
@@ -516,7 +526,6 @@ Streams a chat response as Server-Sent Events.
 ```
 data: {"token": "Here"}
 data: {"token": " are"}
-data: {"token": " two"}
 ...
 data: [DONE]
 ```
@@ -530,7 +539,7 @@ data: [DONE]
 **Rate limit:** 15 requests / minute / IP
 
 ### `GET /api/properties`
-Browse or search properties.
+Browse or search properties using Pinecone semantic search.
 
 | Param | Type | Description |
 |-------|------|-------------|
@@ -539,7 +548,7 @@ Browse or search properties.
 | `source` | string | Filter by `darglobal` or `wasalt` |
 | `city` | string | Filter by city name |
 | `property_type` | string | `apartment`, `villa`, `land`, `commercial` |
-| `query` | string | Semantic search query (uses embeddings) |
+| `query` | string | Semantic search query |
 
 ---
 
@@ -550,11 +559,11 @@ Copy `.env.example` to `.env` and fill in:
 ```bash
 # Required
 OPENROUTER_API_KEY=sk-or-...
+PINECONE_API_KEY=pcsk_...
 
 # Optional – defaults work for local development
+PINECONE_INDEX_NAME=real-estate
 SCRAPE_MAX_PAGES=5
-CHROMA_HOST=vectordb
-CHROMA_PORT=8000
 NEXT_PUBLIC_API_URL=http://localhost:8080
 APP_URL=http://localhost:3000
 APP_TITLE=Real Estate AI Chatbot
@@ -566,9 +575,9 @@ APP_TITLE=Real Estate AI Chatbot
 
 | Concern | Mitigation |
 |---------|-----------|
-| API key exposure | Stored in `.env` only; never in image layers or source code |
-| Prompt injection | Topic guard blocks off-topic input before reaching the LLM |
-| LLM hallucination | System prompt instructs model to answer only from provided context |
+| API key exposure | All keys in `.env` only; never in image layers or source code |
+| Prompt injection | Topic guard blocks off-topic input before any LLM or Pinecone call |
+| LLM hallucination | System prompt requires answers only from provided context |
 | Abuse / scraping | Rate limiting: 15 req/min/IP on `/api/chat` via `slowapi` |
 | CORS | Restricted to configured `ALLOWED_ORIGINS` |
 | Chat history | Never persisted server-side; lives in browser session only |
@@ -582,7 +591,7 @@ APP_TITLE=Real Estate AI Chatbot
 
 ```bash
 cp .env.example .env
-# Edit .env – set OPENROUTER_API_KEY
+# Edit .env – set OPENROUTER_API_KEY and PINECONE_API_KEY
 docker compose up --build
 # Open http://localhost:3000
 ```
@@ -591,11 +600,17 @@ docker compose up --build
 
 1. Push repo to GitHub
 2. Create Railway project → Deploy from GitHub
-3. Set `OPENROUTER_API_KEY` and `APP_URL` in Railway environment variables
+3. Set environment variables in Railway dashboard:
+   - `OPENROUTER_API_KEY`
+   - `PINECONE_API_KEY`
+   - `PINECONE_INDEX_NAME`
+   - `APP_URL` ← set to your Railway public URL
 4. Railway auto-detects `docker-compose.yml` and assigns a public HTTPS URL
-5. Update `NEXT_PUBLIC_API_URL` to point to the deployed backend URL
+5. Update `NEXT_PUBLIC_API_URL` to point to the deployed backend service URL
 
-**Startup order is enforced by Docker Compose health checks:**
+**Startup order:**
 ```
-vectordb (healthy) → scraper (completed) → backend (healthy) → frontend
+scraper (completed) → backend (healthy) → frontend
 ```
+
+> Pinecone is external — no vector DB container to manage or scale.

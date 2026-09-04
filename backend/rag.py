@@ -1,10 +1,11 @@
 """
-RAG retrieval – embeds a query and returns the top-k matching properties from ChromaDB.
+RAG retrieval – embeds a query and returns the top-k matching properties from Pinecone.
 """
 
 import logging
 
-from ingest import get_collection, get_model
+from ingest import get_index, get_model
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -12,40 +13,36 @@ logger = logging.getLogger(__name__)
 def retrieve(query: str, k: int = 5, filters: dict | None = None) -> list[dict]:
     """
     Embed the query and return the top-k most relevant property documents.
-    Each item contains: id, document, metadata, distance, relevance_score.
+    Each item contains: id, document, metadata, score.
     """
     model = get_model()
-    collection = get_collection()
+    index = get_index()
 
     embedding = model.encode([query], show_progress_bar=False).tolist()[0]
-    n_results = min(k, max(collection.count(), 1))
 
     try:
-        raw = collection.query(
-            query_embeddings=[embedding],
-            n_results=n_results,
-            where=filters or None,
-            include=["documents", "metadatas", "distances"],
+        response = index.query(
+            vector=embedding,
+            top_k=k,
+            filter=filters,
+            include_metadata=True,
         )
     except Exception:
-        logger.exception("ChromaDB query failed")
+        logger.exception("Pinecone query failed")
         return []
 
-    docs = raw.get("documents", [[]])[0]
-    metas = raw.get("metadatas", [[]])[0]
-    distances = raw.get("distances", [[]])[0]
-    ids = raw.get("ids", [[]])[0]
+    results = []
+    for match in response.get("matches", []):
+        metadata = match.get("metadata", {})
+        results.append({
+            "id": match.get("id", ""),
+            # text chunk is stored in metadata to avoid a second fetch
+            "document": metadata.pop("text", ""),
+            "metadata": metadata,
+            "relevance_score": round(float(match.get("score", 0)), 3),
+        })
 
-    return [
-        {
-            "id": ids[i],
-            "document": docs[i],
-            "metadata": metas[i],
-            "distance": distances[i],
-            "relevance_score": round(1 - distances[i], 3),
-        }
-        for i in range(len(docs))
-    ]
+    return results
 
 
 def build_context(results: list[dict]) -> str:

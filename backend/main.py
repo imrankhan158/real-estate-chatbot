@@ -34,7 +34,7 @@ limiter = Limiter(key_func=get_remote_address)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting up – ingesting property data into ChromaDB...")
+    logger.info("Starting up – ingesting property data into Pinecone...")
     try:
         result = ingest.ingest_all()
         logger.info("Ingest result: %s", result)
@@ -87,7 +87,7 @@ class ChatRequest(BaseModel):
 @app.get("/health", tags=["system"])
 async def health():
     try:
-        count = ingest.get_collection().count()
+        count = ingest.get_index().describe_index_stats().get("total_vector_count", 0)
         return {"status": "ok", "indexed": count}
     except Exception as exc:
         return {"status": "degraded", "error": str(exc), "indexed": 0}
@@ -137,26 +137,20 @@ async def list_properties(
     """Browse properties with optional semantic search."""
     limit = min(limit, 100)
 
-    if query:
-        filters = {k: v for k, v in {"source": source}.items() if v}
-        results = rag.retrieve(query, k=limit, filters=filters or None)
-        return {"items": [r["metadata"] for r in results], "total": len(results), "page": 1}
-
-    collection = ingest.get_collection()
-    where = {k: v for k, v in {
+    # Build Pinecone metadata filter
+    filter_clauses = {k: {"$eq": v} for k, v in {
         "source": source, "city": city, "property_type": property_type,
     }.items() if v}
+    pinecone_filter = filter_clauses or None
+
+    # Default browse query when no semantic query provided
+    search_query = query or "property listing"
 
     try:
-        result = collection.get(
-            where=where or None,
-            limit=limit,
-            offset=(page - 1) * limit,
-            include=["metadatas"],
-        )
+        results = rag.retrieve(search_query, k=limit, filters=pinecone_filter)
         return {
-            "items": result.get("metadatas", []),
-            "total": collection.count(),
+            "items": [r["metadata"] for r in results],
+            "total": len(results),
             "page": page,
             "limit": limit,
         }
