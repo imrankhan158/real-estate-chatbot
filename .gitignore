@@ -1,0 +1,10 @@
+.env
+data/
+node_modules/
+__pycache__/
+*.pyc
+.next/
+*.egg-info/
+dist/
+.DS_Store
+chroma_data/
